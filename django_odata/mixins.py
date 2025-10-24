@@ -488,46 +488,85 @@ class ODataMixin:
 
             metadata = build_odata_metadata(model_class, serializer_class)
 
-            # Build the schema with main entity type
-            schema = {
-                "$Alias": "Self",
-                "$Kind": "Schema",
-                model_class.__name__: {
+            # Dictionnary to hold all entity definitions
+            entity_definitions = {}
+            
+            # Set to track processed models to avoid infinite recursion
+            processed_models = set()
+
+            def build_entity_definition(model, model_name):
+                """Construct entity definition recursively."""
+                if model_name in processed_models:
+                    return
+                
+                processed_models.add(model_name)
+                
+                entity_def = {
                     "$Kind": "EntityType",
-                    "$Key": ["id"],  # Assume 'id' is the key, could be made configurable
-                    **{
-                        prop_name: {"$Type": prop_info["type"]}
-                        for prop_name, prop_info in metadata["properties"].items()
-                    },
+                    "$Key": ["id"],
+                }
+
+                # Add properties and navigation properties
+                for field in model._meta.get_fields():
+                    if field.concrete and not field.many_to_many and not field.one_to_many:
+                        field_type_name = type(field).__name__
+                        
+                        # Verify if field is a relation
+                        if hasattr(field, 'related_model') and field.related_model:
+                            related_model = field.related_model
+                            related_model_name = related_model.__name__
+                            
+                            entity_def[field.name] = {
+                                "$Kind": "NavigationProperty",
+                                "$Type": f"Self.{related_model_name}",
+                                "$Collection": False,
+                            }
+                            
+                            #  Build related entity definition recursively
+                            if related_model_name not in entity_definitions:
+                                build_entity_definition(related_model, related_model_name)
+                        else:
+                            # Regular field
+                            entity_def[field.name] = {
+                                "$Type": field_type_name
+                            }
+
+                entity_definitions[model_name] = entity_def
+
+            # Define the main entity
+            main_entity = {
+                "$Kind": "EntityType",
+                "$Key": ["id"],
+                **{
+                    prop_name: {"$Type": prop_info["type"]}
+                    for prop_name, prop_info in metadata["properties"].items()
                 },
             }
 
-            # Add navigation properties to the main entity
+            # Add navigation properties
             for nav_prop_name, nav_prop_info in metadata["navigation_properties"].items():
-                related_type = nav_prop_info.get("type", nav_prop_info.get("target_type", "Unknown"))
-                schema[model_class.__name__][nav_prop_name] = {
+                related_type = nav_prop_info.get("type", "Unknown")
+                main_entity[nav_prop_name] = {
                     "$Kind": "NavigationProperty",
                     "$Type": f"Self.{related_type}",
                     "$Collection": nav_prop_info.get("many", False),
                 }
 
-                # Build metadata for related entity if we have the model
+                # Build related entity definition recursively
                 if "related_model" in nav_prop_info:
                     related_model = nav_prop_info["related_model"]
-                    related_entity_def = {
-                        "$Kind": "EntityType",
-                        "$Key": ["id"],
-                    }
+                    if related_type not in entity_definitions:
+                        build_entity_definition(related_model, related_type)
 
-                    # Add properties from the related model
-                    for field in related_model._meta.get_fields():
-                        if field.concrete and not field.many_to_many and not field.one_to_many:
-                            field_type_name = type(field).__name__
-                            related_entity_def[field.name] = {
-                                "$Type": field_type_name
-                            }
+            # Build the full schema
+            schema = {
+                "$Alias": "Self",
+                "$Kind": "Schema",
+                model_class.__name__: main_entity,
+            }
 
-                    schema[related_type] = related_entity_def
+            # Add all related entity definitions
+            schema.update(entity_definitions)
 
             # Add Container
             schema["Container"] = {

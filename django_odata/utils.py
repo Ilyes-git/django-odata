@@ -211,14 +211,28 @@ def build_odata_metadata(model_class, serializer_class) -> Dict[str, Any]:
     expandable_fields = get_expandable_fields_from_serializer(serializer_class)
     for field_name, config in expandable_fields.items():
         if field_name not in metadata["navigation_properties"]:
-            metadata["navigation_properties"][field_name] = {
-                "target_type": config[0] if isinstance(config, tuple) else str(config),
-                "many": (
-                    config[1].get("many", False)
-                    if isinstance(config, tuple) and len(config) > 1
-                    else False
-                ),
-            }
+            # Extract the target serializer and multiplicity
+            target_serializer = config[0] if isinstance(config, tuple) else config
+            is_many = (
+                config[1].get("many", False)
+                if isinstance(config, tuple) and len(config) > 1
+                else False
+            )
+
+            # Extract related model from target serializer
+            if hasattr(target_serializer, 'Meta') and hasattr(target_serializer.Meta, 'model'):
+                related_model = target_serializer.Meta.model
+                metadata["navigation_properties"][field_name] = {
+                    "type": related_model.__name__,
+                    "many": is_many,
+                    "related_model": related_model,
+                }
+            else:
+                # Fallback if we cannot determine related model
+                metadata["navigation_properties"][field_name] = {
+                    "type": str(target_serializer),
+                    "many": is_many,
+                }
 
     return metadata
 
