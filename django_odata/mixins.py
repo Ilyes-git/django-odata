@@ -488,31 +488,61 @@ class ODataMixin:
 
             metadata = build_odata_metadata(model_class, serializer_class)
 
+            # Build the schema with main entity type
+            schema = {
+                "$Alias": "Self",
+                "$Kind": "Schema",
+                model_class.__name__: {
+                    "$Kind": "EntityType",
+                    "$Key": ["id"],  # Assume 'id' is the key, could be made configurable
+                    **{
+                        prop_name: {"$Type": prop_info["type"]}
+                        for prop_name, prop_info in metadata["properties"].items()
+                    },
+                },
+            }
+
+            # Add navigation properties to the main entity
+            for nav_prop_name, nav_prop_info in metadata["navigation_properties"].items():
+                related_type = nav_prop_info.get("type", nav_prop_info.get("target_type", "Unknown"))
+                schema[model_class.__name__][nav_prop_name] = {
+                    "$Kind": "NavigationProperty",
+                    "$Type": f"Self.{related_type}",
+                    "$Collection": nav_prop_info.get("many", False),
+                }
+
+                # Build metadata for related entity if we have the model
+                if "related_model" in nav_prop_info:
+                    related_model = nav_prop_info["related_model"]
+                    related_entity_def = {
+                        "$Kind": "EntityType",
+                        "$Key": ["id"],
+                    }
+
+                    # Add properties from the related model
+                    for field in related_model._meta.get_fields():
+                        if field.concrete and not field.many_to_many and not field.one_to_many:
+                            field_type_name = type(field).__name__
+                            related_entity_def[field.name] = {
+                                "$Type": field_type_name
+                            }
+
+                    schema[related_type] = related_entity_def
+
+            # Add Container
+            schema["Container"] = {
+                "$Kind": "EntityContainer",
+                f"{model_class.__name__.lower()}s": {
+                    "$Collection": True,
+                    "$Type": f"Self.{model_class.__name__}",
+                },
+            }
+
             # Build full OData metadata document
             metadata_doc = {
                 "$Version": "4.0",
                 "$EntityContainer": f"{model_class._meta.app_label}.Container",
-                f"{model_class._meta.app_label}": {
-                    "$Alias": "Self",
-                    "$Kind": "Schema",
-                    model_class.__name__: {
-                        "$Kind": "EntityType",
-                        "$Key": [
-                            "id"
-                        ],  # Assume 'id' is the key, could be made configurable
-                        **{
-                            prop_name: {"$Type": prop_info["type"]}
-                            for prop_name, prop_info in metadata["properties"].items()
-                        },
-                    },
-                    "Container": {
-                        "$Kind": "EntityContainer",
-                        f"{model_class.__name__.lower()}s": {
-                            "$Collection": True,
-                            "$Type": f"Self.{model_class.__name__}",
-                        },
-                    },
-                },
+                f"{model_class._meta.app_label}": schema,
             }
 
             return Response(metadata_doc, content_type="application/json")

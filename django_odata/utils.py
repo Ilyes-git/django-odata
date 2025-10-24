@@ -9,6 +9,7 @@ from django.db.models import QuerySet
 from django.http import QueryDict
 from odata_query.django import apply_odata_query
 from odata_query.exceptions import ODataException
+from rest_framework.relations import RelatedField, ManyRelatedField
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +163,13 @@ def build_odata_metadata(model_class, serializer_class) -> Dict[str, Any]:
     Returns:
         Dictionary containing metadata information
     """
+
     metadata = {
         "name": model_class.__name__,
         "namespace": model_class._meta.app_label,
         "properties": {},
         "navigation_properties": {},
+        "related_entities": {},
     }
 
     # Get serializer fields
@@ -175,23 +178,47 @@ def build_odata_metadata(model_class, serializer_class) -> Dict[str, Any]:
 
     for field_name, field in fields.items():
         field_type = type(field).__name__
-        metadata["properties"][field_name] = {
-            "type": field_type,
-            "required": field.required,
-            "read_only": field.read_only,
-        }
+
+        # Check if this is a related field
+        if isinstance(field, ManyRelatedField):
+            # Handle many-to-many or reverse foreign key
+            child_relation = field.child_relation
+            if hasattr(child_relation, 'queryset') and child_relation.queryset is not None:
+                related_model = child_relation.queryset.model
+                metadata["navigation_properties"][field_name] = {
+                    "type": related_model.__name__,
+                    "many": True,
+                    "related_model": related_model,
+                }
+        elif isinstance(field, RelatedField):
+            # Handle single relation (ForeignKey, OneToOne)
+            if hasattr(field, 'queryset') and field.queryset is not None:
+                related_model = field.queryset.model
+                metadata["navigation_properties"][field_name] = {
+                    "type": related_model.__name__,
+                    "many": False,
+                    "related_model": related_model,
+                }
+        else:
+            # Regular field
+            metadata["properties"][field_name] = {
+                "type": field_type,
+                "required": field.required,
+                "read_only": field.read_only,
+            }
 
     # Get expandable fields (navigation properties)
     expandable_fields = get_expandable_fields_from_serializer(serializer_class)
     for field_name, config in expandable_fields.items():
-        metadata["navigation_properties"][field_name] = {
-            "target_type": config[0] if isinstance(config, tuple) else str(config),
-            "many": (
-                config[1].get("many", False)
-                if isinstance(config, tuple) and len(config) > 1
-                else False
-            ),
-        }
+        if field_name not in metadata["navigation_properties"]:
+            metadata["navigation_properties"][field_name] = {
+                "target_type": config[0] if isinstance(config, tuple) else str(config),
+                "many": (
+                    config[1].get("many", False)
+                    if isinstance(config, tuple) and len(config) > 1
+                    else False
+                ),
+            }
 
     return metadata
 
